@@ -1,0 +1,208 @@
+-- Changess over time analysis 
+Use DataWarehouseAnalytics;
+
+SELECT
+order_date,
+SUM(sales_amount) AS total_sales
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY order_date;
+
+--Year over data aggrigation Trend Analysis
+
+SELECT
+year(order_date) AS order_year,
+COUNT (DISTINCT customer_key) AS total_customers,   
+SUM(sales_amount) AS total_sales,
+sum(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY year(order_date)
+ORDER BY order_year;
+
+--Monthly data aggrigation Trend Analysis (Understanding overall Seasonality)
+
+
+-- Another way of doing the same rATHER TWO COLUMN WE GET 1 column
+
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,
+COUNT (DISTINCT customer_key) AS total_customers,   
+SUM(sales_amount) AS total_sales,
+SUM(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+ORDER BY order_date;
+
+-- we can use format as well in getting result in desired format but the month sorting can be an issue
+
+SELECT
+FORMAT(order_date,'yyyy-MMM') AS order_date,
+COUNT (DISTINCT customer_key) AS total_customers,   
+SUM(sales_amount) AS total_sales,
+SUM(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY FORMAT(order_date,'yyyy-MMM')
+ORDER BY FORMAT(order_date,'yyyy-MMM');
+
+-- Cumulative Sales Analysis
+
+--GROUP BY = aggregate + collapse rows
+-- WINDOW FUNCTION = aggregate + keep all rows
+
+
+-- Running total of Sales Over Time
+
+-- This is the default setup and when we are not partitioning the data year over year or month over month it will give us cumulative sales from the begining of time
+-- ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW is optional here as its the default behavior
+
+SELECT
+order_date,
+total_sales,
+SUM(total_sales) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total_sales
+FROM
+(
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,   
+SUM(sales_amount) AS total_sales,
+SUM(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+) AS monthly_sales
+
+
+-- 1 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (Default)
+-- From the start up to current row
+
+-- 2 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+-- Rolling 3 rows
+
+-- 3 ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING
+-- Future-looking rolling window
+
+-- ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+-- Centered moving average (useful in analytics)
+
+--With Partition by Year
+
+SELECT
+order_date,
+total_sales,
+SUM(total_sales) OVER (partition BY YEAR(order_date) ORDER BY order_date ) AS running_total_sales,
+AVG(avg_price) OVER (partition BY YEAR(order_date) ORDER BY order_date ) AS moving_avg_price
+FROM
+(
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,
+SUM(sales_amount) AS total_sales,
+AVG(price) AS avg_price
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+) AS monthly_sales
+
+-- 3 months moving average
+
+SELECT
+order_date,
+total_sales,
+SUM(total_sales) OVER (partition BY YEAR(order_date) ORDER BY order_date ) AS running_total_sales,
+AVG(avg_price) OVER (partition BY YEAR(order_date) ORDER BY order_date ROWS BETWEEN 2 PRECEDING AND CURRENT ROW ) AS moving_avg_price
+FROM
+(
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,
+SUM(sales_amount) AS total_sales,
+AVG(price) AS avg_price
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+) AS monthly_sales
+
+-- Performance Analysis
+
+-- Analyze the yearly performance of products by compparing each product's sales to both its average performance and previous year sales
+
+SELECT
+f.order_date,
+p.product_name,
+f.sales_amount
+from gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key;
+
+WITH Yearly_product_sales AS (
+SELECT
+year(f.order_date) AS order_year,
+p.product_name,
+SUM(f.sales_amount) as total_sales
+FROM gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key
+where f.order_date IS NOT NULL
+GROUP BY year(f.order_date), p.product_name
+)
+SELECT
+order_year,
+product_name,
+total_sales,
+AVG(total_sales)  OVER (PARTITION BY product_name) AS avg_product_sales,
+total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) AS sales_vs_avg,
+CASE WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) > 0 THEN 'Above Average' 
+     WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) < 0 THEN 'Below Average'
+     ELSE 'Average' END performance_vs_avg
+FROM Yearly_product_sales;
+
+-- Comparing to Previous Year 
+-- year over year comparison (Simmilarly you can do month over month or quarter over quarter)
+
+
+WITH Yearly_product_sales AS (
+SELECT
+year(f.order_date) AS order_year,
+p.product_name,
+SUM(f.sales_amount) as total_sales
+FROM gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key
+where f.order_date IS NOT NULL
+GROUP BY year(f.order_date), p.product_name
+)
+SELECT
+order_year,
+product_name,
+total_sales,
+AVG(total_sales)  OVER (PARTITION BY product_name) AS avg_product_sales,
+total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) AS sales_vs_avg,
+CASE WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) > 0 THEN 'Above Average' 
+     WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) < 0 THEN 'Below Average'
+     ELSE 'Average' END performance_vs_avg,
+LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) AS previous_year_sales,
+total_sales - LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) AS sales_vs_previous_year,
+CASE WHEN total_sales - LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) > 0 THEN 'Improved' 
+     WHEN total_sales - LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) < 0 THEN 'Declined'
+     ELSE 'No Change' END performance_vs_previous_year
+FROM Yearly_product_sales;
+
+-- Part to Whole (Proportion) Analysis
+-- What proportion of total sales does each product category contribute to overall sales
+
+WITH category_sales AS (
+SELECT
+p.category,
+SUM(f.sales_amount) AS cat_sales
+from gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key
+GROUP BY p.category
+)
+SELECT
+category,
+cat_sales,
+SUM(cat_sales) OVER () AS total_sales,
+CONCAT(ROUND(CAST(cat_sales AS FLOAT) / SUM(cat_sales) OVER () * 100, 2), '%') AS sales_proportion
+FROM category_sales;
+
+-- Data Segmentation Analysis
+
+-- Segment products into performance tiers based on their total sales
+
