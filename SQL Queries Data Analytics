@@ -1,0 +1,378 @@
+-- Changess over time analysis 
+Use DataWarehouseAnalytics;
+
+SELECT
+order_date,
+SUM(sales_amount) AS total_sales
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY order_date;
+
+--Year over data aggrigation Trend Analysis
+
+SELECT
+year(order_date) AS order_year,
+COUNT (DISTINCT customer_key) AS total_customers,   
+SUM(sales_amount) AS total_sales,
+sum(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY year(order_date)
+ORDER BY order_year;
+
+--Monthly data aggrigation Trend Analysis (Understanding overall Seasonality)
+
+
+-- Another way of doing the same rATHER TWO COLUMN WE GET 1 column
+
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,
+COUNT (DISTINCT customer_key) AS total_customers,   
+SUM(sales_amount) AS total_sales,
+SUM(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+ORDER BY order_date;
+
+/*we can use format as well in getting result in desired format 
+but the month sorting can be an issue*/
+
+SELECT
+FORMAT(order_date,'yyyy-MMM') AS order_date,
+COUNT (DISTINCT customer_key) AS total_customers,   
+SUM(sales_amount) AS total_sales,
+SUM(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY FORMAT(order_date,'yyyy-MMM')
+ORDER BY FORMAT(order_date,'yyyy-MMM');
+
+-- Cumulative Sales Analysis
+
+--GROUP BY = aggregate + collapse rows
+-- WINDOW FUNCTION = aggregate + keep all rows
+
+
+-- Running total of Sales Over Time
+
+/* This is the default setup and when we are not partitioning the data year 
+over year or month over month it will give us cumulative sales from the 
+begining of time*/
+/* ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW is optional 
+here as its the default behavior*/
+
+SELECT
+order_date,
+total_sales,
+SUM(total_sales) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total_sales
+FROM
+(
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,   
+SUM(sales_amount) AS total_sales,
+SUM(quantity) AS total_quantity
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+) AS monthly_sales
+
+
+-- 1 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (Default)
+-- From the start up to current row
+
+-- 2 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+-- Rolling 3 rows
+
+-- 3 ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING
+-- Future-looking rolling window
+
+-- ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+-- Centered moving average (useful in analytics)
+
+--With Partition by Year
+
+SELECT
+order_date,
+total_sales,
+SUM(total_sales) OVER (partition BY YEAR(order_date) ORDER BY order_date ) AS running_total_sales,
+AVG(avg_price) OVER (partition BY YEAR(order_date) ORDER BY order_date ) AS moving_avg_price
+FROM
+(
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,
+SUM(sales_amount) AS total_sales,
+AVG(price) AS avg_price
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+) AS monthly_sales
+
+-- 3 months moving average
+
+SELECT
+order_date,
+total_sales,
+SUM(total_sales) OVER (partition BY YEAR(order_date) ORDER BY order_date ) AS running_total_sales,
+AVG(avg_price) OVER (partition BY YEAR(order_date) ORDER BY order_date ROWS BETWEEN 2 PRECEDING AND CURRENT ROW ) AS moving_avg_price
+FROM
+(
+SELECT
+DATETRUNC(MONTH,order_date) AS order_date,
+SUM(sales_amount) AS total_sales,
+AVG(price) AS avg_price
+FROM gold.fact_sales
+where order_date IS NOT NULL
+GROUP BY DATETRUNC(MONTH,order_date)
+) AS monthly_sales
+
+-- Performance Analysis
+
+/*Analyze the yearly performance of products by compparing each 
+product's sales to both its average performance and previous year sales*/
+
+SELECT
+f.order_date,
+p.product_name,
+f.sales_amount
+from gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key;
+
+WITH Yearly_product_sales AS (
+SELECT
+year(f.order_date) AS order_year,
+p.product_name,
+SUM(f.sales_amount) as total_sales
+FROM gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key
+where f.order_date IS NOT NULL
+GROUP BY year(f.order_date), p.product_name
+)
+SELECT
+order_year,
+product_name,
+total_sales,
+AVG(total_sales)  OVER (PARTITION BY product_name) AS avg_product_sales,
+total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) AS sales_vs_avg,
+CASE WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) > 0 THEN 'Above Average' 
+     WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) < 0 THEN 'Below Average'
+     ELSE 'Average' END performance_vs_avg
+FROM Yearly_product_sales;
+
+-- Comparing to Previous Year 
+/*  year over year comparison (Simmilarly you can do month over 
+month or quarter over quarter)*/
+
+
+WITH Yearly_product_sales AS (
+SELECT
+year(f.order_date) AS order_year,
+p.product_name,
+SUM(f.sales_amount) as total_sales
+FROM gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key
+where f.order_date IS NOT NULL
+GROUP BY year(f.order_date), p.product_name
+)
+SELECT
+order_year,
+product_name,
+total_sales,
+AVG(total_sales)  OVER (PARTITION BY product_name) AS avg_product_sales,
+total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) AS sales_vs_avg,
+CASE WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) > 0 THEN 'Above Average' 
+     WHEN total_sales - AVG(total_sales)  OVER (PARTITION BY product_name) < 0 THEN 'Below Average'
+     ELSE 'Average' END performance_vs_avg,
+LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) AS previous_year_sales,
+total_sales - LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) AS sales_vs_previous_year,
+CASE WHEN total_sales - LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) > 0 THEN 'Improved' 
+     WHEN total_sales - LAG(total_sales) OVER (PARTITION BY product_name ORDER BY order_year) < 0 THEN 'Declined'
+     ELSE 'No Change' END performance_vs_previous_year
+FROM Yearly_product_sales;
+
+/* LAG(column_name, offset, default_value) OVER (ORDER BY some_column)
+     offset = how many rows back to look, default_value = value to return if no such row exists
+     1 by default, 2,3 etc.where 2 is 2 rows back and so on*/
+
+-- Part to Whole (Proportion) Analysis
+/* What proportion of total sales does each product category 
+ contribute to overall sales*/
+
+WITH category_sales AS (
+SELECT
+p.category,
+SUM(f.sales_amount) AS cat_sales
+from gold.fact_sales f
+JOIN gold.dim_products p on f.product_key = p.product_key
+GROUP BY p.category
+)
+SELECT
+category,
+cat_sales,
+SUM(cat_sales) OVER () AS total_sales,
+CONCAT(ROUND(CAST(cat_sales AS FLOAT) / SUM(cat_sales) OVER () * 100, 2), '%') AS sales_proportion
+FROM category_sales;
+
+-- Data Segmentation Analysis
+
+-- Segment products into cost range and count how many falls in each segment
+
+WITH product_cost_segments AS (
+SELECT product_key,
+product_name,
+cost,
+case 
+    when cost < 100 then 'Below 100'
+    when cost BETWEEN 100 AND 500 then '100-500'
+    when cost BETWEEN 500 AND 1000 then '500-1000'
+    else 'Above 1000' end AS cost_range
+FROM gold.dim_products
+)
+SELECT
+cost_range,
+COUNT(product_key) AS num_products
+FROM product_cost_segments
+GROUP BY cost_range
+ORDER BY num_products DESC;
+
+/* Group Customers into three segnments based in theeir spending behaviour:
+     - VIP: Customers with at least 12 months of history and spending more then 5000.
+     - Regular: Customers with at least 12 months of history and spending between 5000 or less.
+     - New Customers: Customers with less than 12 months of history.
+and find the total no. of customers in each group*/
+
+with customer_spending AS (
+SELECT
+c.customer_key,
+DATEDIFF(month, MIN(f.order_date), MAX(f.order_date))  AS months_active,
+SUM(f.sales_amount)   AS total_spent        
+FROM gold.dim_customers c 
+LEFT JOIN gold.fact_sales f ON c.customer_key = f.customer_key
+GROUP BY c.customer_key
+)
+SELECT
+customer_segment,
+count(customer_key) AS num_customers
+FROM
+(
+SELECT
+customer_key,
+CASE 
+    WHEN months_active >= 12 AND total_spent > 5000 THEN 'VIP'
+    WHEN months_active >= 12 AND total_spent <= 5000 THEN 'Regular'
+    ELSE 'New Customer'
+    END AS customer_segment
+FROM customer_spending) AS t
+GROUP BY customer_segment;
+
+-- It can also be written as
+
+WITH customer_spending AS (
+    SELECT
+        c.customer_key,
+        DATEDIFF(month, MIN(f.order_date), MAX(f.order_date)) AS months_active,
+        SUM(f.sales_amount) AS total_spent
+    FROM gold.dim_customers c
+    LEFT JOIN gold.fact_sales f 
+        ON c.customer_key = f.customer_key
+    GROUP BY c.customer_key
+),
+
+customer_segmented AS (
+    SELECT
+        customer_key,
+        CASE
+            WHEN months_active >= 12 AND total_spent > 5000 THEN 'VIP'
+            WHEN months_active >= 12 AND total_spent <= 5000 THEN 'Regular'
+            ELSE 'New Customer'
+        END AS customer_segment
+    FROM customer_spending
+)
+
+SELECT
+    customer_segment,
+    COUNT(customer_key) AS num_customers
+FROM customer_segmented
+GROUP BY customer_segment;
+
+-- Building Customer Reports
+
+-- 1) Base Query: Retrieving Core columns from tables
+
+CREATE VIEW gold.report_customer AS
+WITH base_customer AS (
+SELECT
+f.order_number,
+f.order_date,  
+f.sales_amount,
+f.customer_key,
+f.product_key,
+f.quantity,
+c.customer_number,
+CONCAT(c.first_name, ' ', c.last_name) AS Customer_name,
+DATEDIFF(year, c.birthdate, GETDATE()) AS customer_age
+FROM gold.fact_sales f 
+JOIN gold.dim_customers c ON f.customer_key = c.customer_key
+WHERE f.order_date IS NOT NULL),
+
+-- 2) converting base ro cte
+-- 3) Performing Aggrigation
+
+AGG_customer AS (
+SELECT
+customer_key,
+customer_number,
+Customer_name,
+customer_age,
+COUNT(distinct order_number) AS total_orders,
+SUM(sales_amount) AS total_spent,
+SUM(quantity) AS total_quantity,
+count(distinct product_key) AS unique_products_purchased,
+MAX(order_date) AS last_order_date,
+DATEDIFF(MONTH,MIN(order_date), MAX(order_date)) AS lifespan
+FROM base_customer
+GROUP BY
+customer_key,
+customer_number,
+Customer_name,
+customer_age
+)
+
+-- 4) Segmentationa and KPI Calculation
+
+SELECT
+
+customer_key,
+customer_number,
+Customer_name,
+customer_age,
+CASE
+     WHEN customer_age<20 THEN 'Under 20'
+     WHEN customer_age BETWEEN 20 AND 35 THEN '20-35'
+     WHEN customer_age BETWEEN 36 AND 50 THEN '36-50'
+     ELSE '51 and above' END AS age_group,
+CASE
+     WHEN lifespan >= 12 AND total_spent > 5000 THEN 'VIP'
+     WHEN lifespan >= 12 AND total_spent <= 5000 THEN 'Regular'
+     ELSE 'New Customer'
+     END AS customer_segment,
+total_orders,
+total_spent,
+total_quantity,
+unique_products_purchased,
+last_order_date,
+DATEDIFF(MONTH,last_order_date, GETDATE()) AS Recent_order,
+lifespan,
+-- Average order value
+CASE WHEN total_spent = 0 THEN 0
+     ELSE
+     ROUND(CAST(total_spent AS FLOAT) / NULLIF(total_orders,0),2)
+     END AS avg_order_value ,
+-- Average monthly spend
+CASE WHEN lifespan = 0 THEN total_spent
+     ELSE
+     ROUND(CAST(total_spent AS FLOAT) / NULLIF(lifespan,0),2)
+     END AS avg_monthly_spend     
+FROM AGG_customer;
+
+-- Ignore the errors as its vs code issue 
